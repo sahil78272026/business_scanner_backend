@@ -4,12 +4,31 @@ import csv
 import requests
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from flask_bcrypt import Bcrypt
+import psycopg2
 from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
+from datetime import datetime, timedelta
+import jwt
 load_dotenv()
 
 
 app = Flask(__name__)
 CORS(app)  # Needed for React frontend
+
+bcrypt = Bcrypt(app)
+
+SECRET = "YOUR_JWT_SECRET"   # Change this to a long random string
+
+DB_CONN = psycopg2.connect(
+    host="localhost",
+    database="business_scanner",
+    user="postgres",
+    password=os.getenv("POSTGRES_PASSWORD")
+)
+
+def get_cursor():
+    return DB_CONN.cursor(cursor_factory=RealDictCursor)
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 
@@ -177,6 +196,96 @@ def export_csv():
     mem.seek(0)
 
     return send_file(mem, mimetype="text/csv", download_name="businesses.csv", as_attachment=True)
+
+
+@app.get("/api/autocomplete")
+def autocomplete():
+    query = request.args.get("query")
+    if not query:
+        return jsonify([])
+
+    url = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
+    params = {
+        "input": query,
+        "types": "(cities)",
+        "key": GOOGLE_API_KEY
+    }
+
+    resp = requests.get(url, params=params)
+    data = resp.json()
+
+    predictions = data.get("predictions", [])
+    suggestions = [p["description"] for p in predictions]
+
+    return jsonify(suggestions)
+
+
+@app.post("/api/register")
+def register():
+    data = request.json
+    email = data.get("email")
+    password = data.get("password")
+
+    if not email or not password:
+        return {"error": "Email and password required"}, 400
+
+    hashed = bcrypt.generate_password_hash(password).decode("utf-8")
+
+    try:
+        cur = get_cursor()
+        cur.execute(
+            "INSERT INTO users (email, password) VALUES (%s, %s) RETURNING id",
+            (email, hashed),
+        )
+        user = cur.fetchone()
+        DB_CONN.commit()
+
+        return {"message": "User registered successfully", "user_id": user["id"]}
+
+    except Exception as e:
+        return {"error": "Email already in use"}, 400
+
+@app.post("/api/login")
+def login():
+    data = request.json
+    email = data.get("email")
+    password = data.get("password")
+
+    cur = get_cursor()
+    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+
+    if not user:
+        return {"error": "User not found"}, 400
+
+    if not bcrypt.check_password_hash(user["password"], password):
+        return {"error": "Incorrect password"}, 400
+
+    token = jwt.encode(
+        {"id": user["id"], "exp": datetime.utcnow() + timedelta(days=1)},
+        SECRET,
+        algorithm="HS256"
+    )
+
+    return {"token": token, "email": user["email"]}
+
+@app.get("/api/profile")
+def profile():
+    token = request.headers.get("Authorization")
+    if not token:
+        return {"error": "Missing token"}, 401
+
+    try:
+        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        user_id = payload["id"]
+    except:
+        return {"error": "Invalid or expired token"}, 401
+
+    cur = get_cursor()
+    cur.execute("SELECT id, email, created_at FROM users WHERE id=%s", (user_id,))
+    user = cur.fetchone()
+    return user
+
 
 
 if __name__ == "__main__":
