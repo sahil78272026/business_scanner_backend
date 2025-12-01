@@ -2,14 +2,16 @@ import os
 import io
 import csv
 import requests
+import jwt
+import re
+import psycopg2
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
-import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
-import jwt
+
 load_dotenv()
 
 
@@ -51,6 +53,65 @@ def geocode_city(city: str):
 
     location = data["results"][0]["geometry"]["location"]
     return location["lat"], location["lng"]
+
+
+def clean_email_list(emails):
+    cleaned = []
+    banned_domains = [
+        "sentry.io",
+        "wixpress.com",
+        "sentry.wixpress.com",
+        "sentry-next.wixpress.com"
+        "oyorooms.com"
+    ]
+
+    for email in emails:
+        local, _, domain = email.lower().partition("@")
+
+        # Skip banned domains
+        if domain in banned_domains:
+            continue
+
+        # Skip emails with extremely long "local" part (usually noise)
+        if len(local) > 25:
+            continue
+
+        # Skip numeric-only local parts
+        if local.isdigit():
+            continue
+
+        # Skip hex-like random strings
+        if re.fullmatch(r"[a-f0-9]{20,}", local):
+            continue
+
+        cleaned.append(email)
+
+    return cleaned
+
+
+def extract_emails_from_website(url):
+    print(f"Scraping: {url}")
+    try:
+        response = requests.get(url, timeout=5, headers={
+            "User-Agent": "Mozilla/5.0"
+        })
+        html = response.text
+
+        # Extract all possible emails
+        emails = re.findall(
+            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+            html
+        )
+
+        emails = list(set(emails))          # Deduplicate
+        cleaned = clean_email_list(emails)  # ⭐ Clean junk
+
+        print("Cleaned Emails:", cleaned)
+        return cleaned
+
+    except Exception as e:
+        print("Email scrape error:", e)
+        return []
 
 
 # ---------------------------------------
@@ -97,6 +158,12 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
         details_resp = requests.get(details_url, params=details_params)
         details = details_resp.json().get("result", {})
 
+        emails = []
+        website = details.get("website")
+        if website:
+            emails = extract_emails_from_website(website)
+
+
         final_list.append({
             "name": details.get("name"),
             "address": details.get("formatted_address"),
@@ -105,10 +172,16 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
             "reviews_count": details.get("user_ratings_total"),
             "website": details.get("website"),
             "maps_url": details.get("url"),
+            "emails":emails,
             "types": details.get("types", [])
         })
 
     return final_list
+
+
+
+
+
 
 
 # --------------------------
@@ -178,9 +251,22 @@ def export_csv():
     output = io.StringIO()
     writer = csv.writer(output)
 
-    writer.writerow(["Name", "Address", "Phone", "Rating", "Reviews", "Website", "Google Maps URL"])
+    # ⭐ Added Email column
+    writer.writerow([
+        "Name",
+        "Address",
+        "Phone",
+        "Rating",
+        "Reviews",
+        "Website",
+        "Google Maps URL",
+        "Emails"
+    ])
 
     for b in businesses:
+        # join emails list into a comma-separated string
+        emails_str = ", ".join(b.get("emails", []))
+
         writer.writerow([
             b.get("name", ""),
             b.get("address", ""),
@@ -188,14 +274,21 @@ def export_csv():
             b.get("rating", ""),
             b.get("reviews_count", ""),
             b.get("website", ""),
-            b.get("maps_url", "")
+            b.get("maps_url", ""),
+            emails_str  # ⭐ Added email data
         ])
 
     output.seek(0)
     mem = io.BytesIO(output.getvalue().encode("utf-8"))
     mem.seek(0)
 
-    return send_file(mem, mimetype="text/csv", download_name="businesses.csv", as_attachment=True)
+    return send_file(
+        mem,
+        mimetype="text/csv",
+        download_name="businesses.csv",
+        as_attachment=True
+    )
+
 
 
 @app.get("/api/autocomplete")
@@ -304,21 +397,22 @@ def save_business():
     cur = get_cursor()
     try:
         cur.execute("""
-            INSERT INTO saved_businesses
-            (user_id, name, address, phone, website, rating, reviews_count, maps_url)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (user_id, name, address) DO NOTHING
-            RETURNING id
-        """, (
-            user_id,
-            data["name"],
-            data.get("address"),
-            data.get("phone"),
-            data.get("website"),
-            data.get("rating"),
-            data.get("reviews_count"),
-            data.get("maps_url")
-        ))
+                INSERT INTO saved_businesses
+                (user_id, name, address, phone, website, rating, reviews_count, maps_url, emails)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, name, address) DO NOTHING
+                RETURNING id
+            """, (
+                user_id,
+                data["name"],
+                data.get("address"),
+                data.get("phone"),
+                data.get("website"),
+                data.get("rating"),
+                data.get("reviews_count"),
+                data.get("maps_url"),
+                ", ".join(data.get("emails", []))   # ⭐ convert list → string
+            ))
 
         result = cur.fetchone()
         DB_CONN.commit()
@@ -348,6 +442,13 @@ def get_saved_businesses():
     cur = get_cursor()
     cur.execute("SELECT * FROM saved_businesses WHERE user_id=%s ORDER BY saved_at DESC", (user_id,))
     rows = cur.fetchall()
+    # ⭐ Convert stored TEXT to list
+    for row in rows:
+        email_str = row.get("emails")
+        if email_str:
+            row["emails"] = [e.strip() for e in email_str.split(",")]
+        else:
+            row["emails"] = []
 
     return rows
 
