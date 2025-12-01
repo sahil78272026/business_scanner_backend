@@ -287,6 +287,72 @@ def profile():
     return user
 
 
+@app.post("/api/save-business")
+def save_business():
+    token = request.headers.get("Authorization")
+    if not token:
+        return {"error": "Unauthorized"}, 401
+
+    try:
+        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        user_id = payload["id"]
+    except:
+        return {"error": "Invalid token"}, 401
+
+    data = request.json
+
+    cur = get_cursor()
+    try:
+        cur.execute("""
+            INSERT INTO saved_businesses
+            (user_id, name, address, phone, website, rating, reviews_count, maps_url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, name, address) DO NOTHING
+            RETURNING id
+        """, (
+            user_id,
+            data["name"],
+            data.get("address"),
+            data.get("phone"),
+            data.get("website"),
+            data.get("rating"),
+            data.get("reviews_count"),
+            data.get("maps_url")
+        ))
+
+        result = cur.fetchone()
+        DB_CONN.commit()
+
+        if result:
+            return {"message": "Saved successfully"}
+        else:
+            return {"message": "Already saved"}
+
+    except Exception as e:
+        print(e)
+        return {"error": "Failed to save business"}, 500
+
+
+@app.get("/api/saved-businesses")
+def get_saved_businesses():
+    token = request.headers.get("Authorization")
+    if not token:
+        return {"error": "Unauthorized"}, 401
+
+    try:
+        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        user_id = payload["id"]
+    except:
+        return {"error": "Invalid token"}, 401
+
+    cur = get_cursor()
+    cur.execute("SELECT * FROM saved_businesses WHERE user_id=%s ORDER BY saved_at DESC", (user_id,))
+    rows = cur.fetchall()
+
+    return rows
+
+
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
