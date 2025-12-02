@@ -24,3 +24,5 @@ CREATE TABLE saved_businesses (
 
 
 
+ALTER TABLE saved_businesses
+ADD COLUMN emails TEXT;

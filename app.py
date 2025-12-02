@@ -61,7 +61,7 @@ def clean_email_list(emails):
         "sentry.io",
         "wixpress.com",
         "sentry.wixpress.com",
-        "sentry-next.wixpress.com"
+        "sentry-next.wixpress.com",
         "oyorooms.com"
     ]
 
@@ -90,34 +90,77 @@ def clean_email_list(emails):
 
 
 def extract_emails_from_website(url):
-    print(f"Scraping: {url}")
+    print(f"Scraping homepage: {url}")
+
+    # Normalize URL (remove trailing slash)
+    if url.endswith("/"):
+        url = url[:-1]
+
+    all_emails = []
+
+    # 1️⃣ Scrape homepage first
     try:
-        response = requests.get(url, timeout=5, headers={
-            "User-Agent": "Mozilla/5.0"
-        })
+        response = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
         html = response.text
 
-        # Extract all possible emails
-        emails = re.findall(
+        homepage_emails = re.findall(
             r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
             html
         )
 
-        emails = list(set(emails))          # Deduplicate
-        cleaned = clean_email_list(emails)  # ⭐ Clean junk
-
-        print("Cleaned Emails:", cleaned)
-        return cleaned
+        all_emails.extend(homepage_emails)
 
     except Exception as e:
-        print("Email scrape error:", e)
-        return []
+        print("Homepage scrape error:", e)
+
+    # Clean homepage emails
+    cleaned_home = clean_email_list(list(set(all_emails)))
+
+    # If homepage returns valid emails → return early
+    if cleaned_home:
+        print("Found good emails on homepage:", cleaned_home)
+        return cleaned_home
+
+    # 2️⃣ Otherwise, scrape extra pages
+    EXTRA_PATHS = [
+        "/contact",
+        "/contact-us",
+        "/contactus",
+        "/about",
+        "/about-us",
+        "/support",
+        "/help"
+    ]
+
+    for path in EXTRA_PATHS:
+        full_url = url + path
+        print(f"Scraping secondary page: {full_url}")
+
+        try:
+            resp = requests.get(full_url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+            html = resp.text
+
+            extra_emails = re.findall(
+                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                html
+            )
+
+            all_emails.extend(extra_emails)
+
+        except Exception as e:
+            print(f"Error scraping {full_url}: {e}")
+
+    # 3️⃣ Final cleaning
+    cleaned_final = clean_email_list(list(set(all_emails)))
+    print("Final cleaned emails:", cleaned_final)
+
+    return cleaned_final
 
 
 # ---------------------------------------
 # 📌 2. Fetch businesses using Places API
 # ---------------------------------------
-def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
+def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None, next_token=None):
     nearby_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 
     params = {
@@ -130,6 +173,9 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
         params["type"] = place_type
     if keyword:
         params["keyword"] = keyword
+    if next_token:
+        params["pagetoken"]= next_token
+
 
     resp = requests.get(nearby_url, params=params)
     data = resp.json()
@@ -137,8 +183,10 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
     if data.get("status") not in ["OK", "ZERO_RESULTS"]:
         raise RuntimeError(data.get("error_message", "Google API Error"))
 
+
     results = data.get("results", [])
     results = results[:25]  # Limit to avoid too many API calls
+    next_page_token = data.get("next_page_token")  # ⭐ NEW
 
     final_list = []
 
@@ -159,9 +207,9 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
         details = details_resp.json().get("result", {})
 
         emails = []
-        website = details.get("website")
-        if website:
-            emails = extract_emails_from_website(website)
+        # website = details.get("website")
+        # if website:
+        #     emails = extract_emails_from_website(website)
 
 
         final_list.append({
@@ -176,12 +224,10 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None):
             "types": details.get("types", [])
         })
 
-    return final_list
-
-
-
-
-
+    return {
+        "businesses": final_list,
+        "next_page_token": next_page_token   # ⭐ RETURN IT
+    }
 
 
 # --------------------------
@@ -220,9 +266,11 @@ def api_businesses():
     business_type = request.args.get("type")
     radius = int(request.args.get("radius", 2000))
     keyword = request.args.get("keyword")
+    next_token = request.args.get("next_page_token")
+
 
     try:
-        businesses = fetch_businesses(lat, lng, business_type, radius, keyword)
+        businesses = fetch_businesses(lat, lng, business_type, radius, keyword, next_token)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -230,28 +278,16 @@ def api_businesses():
 
 
 # Export business list as CSV
-@app.get("/api/export-csv")
-def export_csv():
-    lat = request.args.get("lat")
-    lng = request.args.get("lng")
+@app.post("/api/export-csv")
+def export_csv_post():
+    data = request.json.get("businesses", [])
+    if not data:
+        return jsonify({"error": "No business data provided"}), 400
 
-    if not lat or not lng:
-        return jsonify({"error": "lat and lng required"}), 400
-
-    lat = float(lat)
-    lng = float(lng)
-
-    business_type = request.args.get("type")
-    radius = int(request.args.get("radius", 2000))
-    keyword = request.args.get("keyword")
-
-    businesses = fetch_businesses(lat, lng, business_type, radius, keyword)
-
-    # Convert to CSV
     output = io.StringIO()
     writer = csv.writer(output)
 
-    # ⭐ Added Email column
+    # Add headers
     writer.writerow([
         "Name",
         "Address",
@@ -263,8 +299,8 @@ def export_csv():
         "Emails"
     ])
 
-    for b in businesses:
-        # join emails list into a comma-separated string
+    # Add business rows
+    for b in data:
         emails_str = ", ".join(b.get("emails", []))
 
         writer.writerow([
@@ -275,7 +311,7 @@ def export_csv():
             b.get("reviews_count", ""),
             b.get("website", ""),
             b.get("maps_url", ""),
-            emails_str  # ⭐ Added email data
+            emails_str
         ])
 
     output.seek(0)
@@ -288,6 +324,7 @@ def export_csv():
         download_name="businesses.csv",
         as_attachment=True
     )
+
 
 
 
@@ -452,6 +489,19 @@ def get_saved_businesses():
 
     return rows
 
+
+@app.get("/api/scrape-email")
+def scrape_email_api():
+    url = request.args.get("url")
+    if not url:
+        return {"emails": []}
+
+    try:
+        emails = extract_emails_from_website(url)
+        return {"emails": emails}
+    except Exception as e:
+        print("Scrape error:", e)
+        return {"emails": []}
 
 
 
