@@ -25,4 +25,7 @@ CREATE TABLE saved_businesses (
 
 
 ALTER TABLE saved_businesses
-ADD COLUMN emails TEXT;
+ADD COLUMN status VARCHAR(50) DEFAULT 'not_contacted';
+
+ALTER TABLE saved_businesses
+ADD COLUMN notes TEXT DEFAULT '';

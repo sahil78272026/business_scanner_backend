@@ -1,19 +1,17 @@
-import os
 import io
 import csv
 import requests
 import jwt
-import re
-import psycopg2
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
-from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
+from common_helpers import extract_emails_from_website
+from google_helpers import geocode_city, GOOGLE_API_KEY, fetch_businesses
+from db_extentions import get_cursor, DB_CONN
 
 load_dotenv()
-
 
 app = Flask(__name__)
 CORS(app)  # Needed for React frontend
@@ -21,218 +19,6 @@ CORS(app)  # Needed for React frontend
 bcrypt = Bcrypt(app)
 
 SECRET = "YOUR_JWT_SECRET"   # Change this to a long random string
-
-DB_CONN = psycopg2.connect(
-    host="localhost",
-    database="business_scanner",
-    user="postgres",
-    password=os.getenv("POSTGRES_PASSWORD")
-)
-
-def get_cursor():
-    return DB_CONN.cursor(cursor_factory=RealDictCursor)
-
-GOOGLE_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
-
-if not GOOGLE_API_KEY:
-    raise RuntimeError("Environment variable GOOGLE_MAPS_API_KEY is not set.")
-
-
-# -----------------------------
-# 📌 1. Convert city → lat,lng
-# -----------------------------
-def geocode_city(city: str):
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {"address": city, "key": GOOGLE_API_KEY}
-
-    resp = requests.get(url, params=params)
-    data = resp.json()
-
-    if data.get("status") != "OK":
-        return None
-
-    location = data["results"][0]["geometry"]["location"]
-    return location["lat"], location["lng"]
-
-
-def clean_email_list(emails):
-    cleaned = []
-    banned_domains = [
-        "sentry.io",
-        "wixpress.com",
-        "sentry.wixpress.com",
-        "sentry-next.wixpress.com",
-        "oyorooms.com"
-    ]
-
-    for email in emails:
-        local, _, domain = email.lower().partition("@")
-
-        # Skip banned domains
-        if domain in banned_domains:
-            continue
-
-        # Skip emails with extremely long "local" part (usually noise)
-        if len(local) > 25:
-            continue
-
-        # Skip numeric-only local parts
-        if local.isdigit():
-            continue
-
-        # Skip hex-like random strings
-        if re.fullmatch(r"[a-f0-9]{20,}", local):
-            continue
-
-        cleaned.append(email)
-
-    return cleaned
-
-
-def extract_emails_from_website(url):
-    print(f"Scraping homepage: {url}")
-
-    # Normalize URL (remove trailing slash)
-    if url.endswith("/"):
-        url = url[:-1]
-
-    all_emails = []
-
-    # 1️⃣ Scrape homepage first
-    try:
-        response = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
-        html = response.text
-
-        homepage_emails = re.findall(
-            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-            html
-        )
-
-        all_emails.extend(homepage_emails)
-
-    except Exception as e:
-        print("Homepage scrape error:", e)
-
-    # Clean homepage emails
-    cleaned_home = clean_email_list(list(set(all_emails)))
-
-    # If homepage returns valid emails → return early
-    if cleaned_home:
-        print("Found good emails on homepage:", cleaned_home)
-        return cleaned_home
-
-    # 2️⃣ Otherwise, scrape extra pages
-    EXTRA_PATHS = [
-        "/contact",
-        "/contact-us",
-        "/contactus",
-        "/about",
-        "/about-us",
-        "/support",
-        "/help"
-    ]
-
-    for path in EXTRA_PATHS:
-        full_url = url + path
-        print(f"Scraping secondary page: {full_url}")
-
-        try:
-            resp = requests.get(full_url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
-            html = resp.text
-
-            extra_emails = re.findall(
-                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-                html
-            )
-
-            all_emails.extend(extra_emails)
-
-        except Exception as e:
-            print(f"Error scraping {full_url}: {e}")
-
-    # 3️⃣ Final cleaning
-    cleaned_final = clean_email_list(list(set(all_emails)))
-    print("Final cleaned emails:", cleaned_final)
-
-    return cleaned_final
-
-
-# ---------------------------------------
-# 📌 2. Fetch businesses using Places API
-# ---------------------------------------
-def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None, next_token=None):
-    nearby_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-
-    params = {
-        "location": f"{lat},{lng}",
-        "radius": radius,
-        "key": GOOGLE_API_KEY,
-    }
-
-    if place_type:
-        params["type"] = place_type
-    if keyword:
-        params["keyword"] = keyword
-    if next_token:
-        params["pagetoken"]= next_token
-
-
-    resp = requests.get(nearby_url, params=params)
-    data = resp.json()
-
-    if data.get("status") not in ["OK", "ZERO_RESULTS"]:
-        raise RuntimeError(data.get("error_message", "Google API Error"))
-
-
-    results = data.get("results", [])
-    results = results[:25]  # Limit to avoid too many API calls
-    next_page_token = data.get("next_page_token")  # ⭐ NEW
-
-    final_list = []
-
-    for place in results:
-        place_id = place.get("place_id")
-        if not place_id:
-            continue
-
-        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-        details_params = {
-            "place_id": place_id,
-            "fields": "name,formatted_address,formatted_phone_number,website,"
-                      "rating,user_ratings_total,url,types",
-            "key": GOOGLE_API_KEY,
-        }
-
-        details_resp = requests.get(details_url, params=details_params)
-        details = details_resp.json().get("result", {})
-
-        emails = []
-        # website = details.get("website")
-        # if website:
-        #     emails = extract_emails_from_website(website)
-
-
-        final_list.append({
-            "name": details.get("name"),
-            "address": details.get("formatted_address"),
-            "phone": details.get("formatted_phone_number"),
-            "rating": details.get("rating"),
-            "reviews_count": details.get("user_ratings_total"),
-            "website": details.get("website"),
-            "maps_url": details.get("url"),
-            "emails":emails,
-            "types": details.get("types", [])
-        })
-
-    return {
-        "businesses": final_list,
-        "next_page_token": next_page_token   # ⭐ RETURN IT
-    }
-
-
-# --------------------------
-# 📌 API ROUTES
-# --------------------------
 
 # Convert city name → lat,lng
 @app.get("/api/geocode")
@@ -324,8 +110,6 @@ def export_csv_post():
         download_name="businesses.csv",
         as_attachment=True
     )
-
-
 
 
 @app.get("/api/autocomplete")
@@ -502,6 +286,66 @@ def scrape_email_api():
     except Exception as e:
         print("Scrape error:", e)
         return {"emails": []}
+
+
+@app.post("/api/update-status")
+def update_status():
+    token = request.headers.get("Authorization")
+    if not token:
+        return {"error": "Unauthorized"}, 401
+
+    try:
+        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        user_id = payload["id"]
+    except:
+        return {"error": "Invalid token"}, 401
+
+    data = request.json
+    business_id = data.get("id")
+    status = data.get("status")
+
+    print(business_id)
+    print(status)
+    print(user_id)
+    cur = get_cursor()
+    try:
+        cur.execute("""
+            UPDATE saved_businesses
+            SET status = %s
+            WHERE id = %s AND user_id = %s
+        """, (status, business_id, user_id))
+        DB_CONN.commit()
+    except Exception as e:
+        print(e)
+
+    return {"success": True}
+
+
+@app.post("/api/update-notes")
+def update_notes():
+    token = request.headers.get("Authorization")
+    if not token:
+        return {"error": "Unauthorized"}, 401
+
+    try:
+        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        user_id = payload["id"]
+    except:
+        return {"error": "Invalid token"}, 401
+
+    data = request.json
+    business_id = data.get("id")
+    notes = data.get("notes")
+
+    cur = get_cursor()
+    cur.execute("""
+        UPDATE saved_businesses
+        SET notes = %s
+        WHERE id = %s AND user_id = %s
+    """, (notes, business_id, user_id))
+    DB_CONN.commit()
+
+    return {"success": True}
 
 
 
