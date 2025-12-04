@@ -1,3 +1,4 @@
+import os
 import io
 import csv
 import requests
@@ -10,6 +11,16 @@ from datetime import datetime, timedelta
 from common_helpers import extract_emails_from_website
 from google_helpers import geocode_city, GOOGLE_API_KEY, fetch_businesses
 from db_extentions import get_cursor, DB_CONN
+import bcrypt
+import datetime
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# Google token verify
+from google.oauth2 import id_token
+from google.auth.transport import requests as grequests
 
 load_dotenv()
 
@@ -18,7 +29,33 @@ CORS(app)  # Needed for React frontend
 
 bcrypt = Bcrypt(app)
 
-SECRET = "YOUR_JWT_SECRET"   # Change this to a long random string
+APP_SECRET = os.getenv("APP_SECRET", "change-this-secret")
+JWT_ALGO = "HS256"
+JWT_EXP_DELTA_SECONDS = int(os.getenv("JWT_EXP", 60*60*24*7))  # one week
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")  # same as VITE_GOOGLE_CLIENT_ID
+DB_URI = os.getenv("DATABASE_URL")  # e.g., postgres://user:pass@host:5432/dbname
+
+def get_db():
+    conn = psycopg2.connect(DB_URI)
+    return conn
+
+# JWT helpers
+def generate_jwt(payload):
+    payload_copy = payload.copy()
+    payload_copy["exp"] = datetime.datetime.utcnow() + datetime.timedelta(seconds=JWT_EXP_DELTA_SECONDS)
+    token = jwt.encode(payload_copy, APP_SECRET, algorithm=JWT_ALGO)
+    # PyJWT 2.x returns bytes for encode in some versions; ensure str
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+    return token
+
+def decode_jwt(token):
+    return jwt.decode(token, APP_SECRET, algorithms=[JWT_ALGO])
+
+
+
+
+
 
 # Convert city name → lat,lng
 @app.get("/api/geocode")
@@ -134,54 +171,55 @@ def autocomplete():
     return jsonify(suggestions)
 
 
-@app.post("/api/register")
-def register():
-    data = request.json
-    email = data.get("email")
-    password = data.get("password")
+# @app.post("/api/register")
+# def register():
+#     data = request.json
+#     email = data.get("email")
+#     password = data.get("password")
 
-    if not email or not password:
-        return {"error": "Email and password required"}, 400
+#     if not email or not password:
+#         return {"error": "Email and password required"}, 400
 
-    hashed = bcrypt.generate_password_hash(password).decode("utf-8")
+#     hashed = bcrypt.generate_password_hash(password).decode("utf-8")
 
-    try:
-        cur = get_cursor()
-        cur.execute(
-            "INSERT INTO users (email, password) VALUES (%s, %s) RETURNING id",
-            (email, hashed),
-        )
-        user = cur.fetchone()
-        DB_CONN.commit()
+#     try:
+#         cur = get_cursor()
+#         cur.execute(
+#             "INSERT INTO users (email, password) VALUES (%s, %s) RETURNING id",
+#             (email, hashed),
+#         )
+#         user = cur.fetchone()
+#         DB_CONN.commit()
 
-        return {"message": "User registered successfully", "user_id": user["id"]}
+#         return {"message": "User registered successfully", "user_id": user["id"]}
 
-    except Exception as e:
-        return {"error": "Email already in use"}, 400
+#     except Exception as e:
+#         print(e)
+#         return {"error": "Email already in use"}, 400
 
-@app.post("/api/login")
-def login():
-    data = request.json
-    email = data.get("email")
-    password = data.get("password")
+# @app.post("/api/login")
+# def login():
+#     data = request.json
+#     email = data.get("email")
+#     password = data.get("password")
 
-    cur = get_cursor()
-    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-    user = cur.fetchone()
+#     cur = get_cursor()
+#     cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+#     user = cur.fetchone()
 
-    if not user:
-        return {"error": "User not found"}, 400
+#     if not user:
+#         return {"error": "User not found"}, 400
 
-    if not bcrypt.check_password_hash(user["password"], password):
-        return {"error": "Incorrect password"}, 400
+#     if not bcrypt.check_password_hash(user["password"], password):
+#         return {"error": "Incorrect password"}, 400
 
-    token = jwt.encode(
-        {"id": user["id"], "exp": datetime.utcnow() + timedelta(days=1)},
-        SECRET,
-        algorithm="HS256"
-    )
+#     token = jwt.encode(
+#         {"id": user["id"], "exp": datetime.utcnow() + timedelta(days=1)},
+#         SECRET,
+#         algorithm="HS256"
+#     )
 
-    return {"token": token, "email": user["email"]}
+#     return {"token": token, "email": user["email"]}
 
 @app.get("/api/profile")
 def profile():
@@ -190,7 +228,7 @@ def profile():
         return {"error": "Missing token"}, 401
 
     try:
-        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token.replace("Bearer ", ""), APP_SECRET, algorithms=["HS256"])
         user_id = payload["id"]
     except:
         return {"error": "Invalid or expired token"}, 401
@@ -208,7 +246,7 @@ def save_business():
         return {"error": "Unauthorized"}, 401
 
     try:
-        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token.replace("Bearer ", ""), APP_SECRET, algorithms=["HS256"])
         user_id = payload["id"]
     except:
         return {"error": "Invalid token"}, 401
@@ -255,7 +293,7 @@ def get_saved_businesses():
         return {"error": "Unauthorized"}, 401
 
     try:
-        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token.replace("Bearer ", ""), APP_SECRET, algorithms=["HS256"])
         user_id = payload["id"]
     except:
         return {"error": "Invalid token"}, 401
@@ -295,7 +333,7 @@ def update_status():
         return {"error": "Unauthorized"}, 401
 
     try:
-        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token.replace("Bearer ", ""), APP_SECRET, algorithms=["HS256"])
         user_id = payload["id"]
     except:
         return {"error": "Invalid token"}, 401
@@ -328,7 +366,7 @@ def update_notes():
         return {"error": "Unauthorized"}, 401
 
     try:
-        payload = jwt.decode(token.replace("Bearer ", ""), SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token.replace("Bearer ", ""), APP_SECRET, algorithms=["HS256"])
         user_id = payload["id"]
     except:
         return {"error": "Invalid token"}, 401
@@ -346,6 +384,143 @@ def update_notes():
     DB_CONN.commit()
 
     return {"success": True}
+
+
+
+# REGISTER (email/password)
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = request.json or {}
+    name = data.get("name", "").strip()
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    if not name or not email or not password:
+        return jsonify({"error": "name, email and password required"}), 400
+
+    cur = get_cursor()
+    # Check if user exists
+    cur.execute("SELECT id, provider FROM users WHERE email = %s", (email,))
+    existing = cur.fetchone()
+    if existing:
+        # If user exists and provider is google, do not create password user
+        if existing.get("provider") == "google":
+            return jsonify({"error": "Account exists with Google Sign-in. Use Google login."}), 400
+        return jsonify({"error": "User already exists"}), 400
+
+    # Hash password
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    # Save user
+    cur.execute(
+        "INSERT INTO users (name, email, password, provider, created_at) VALUES (%s,%s,%s,%s,NOW()) RETURNING id",
+        (name, email, hashed, "password")
+    )
+    user_id = cur.fetchone()["id"]
+    DB_CONN.commit()
+
+    token = generate_jwt({"id": user_id, "email": email})
+    # DB_CONN.close()
+    return jsonify({"token": token})
+
+# LOGIN (email/password)
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password", "")
+
+    if not email or not password:
+        return jsonify({"error": "email and password required"}), 400
+
+    cur=get_cursor()
+    cur.execute("SELECT id, password, provider FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+
+    if not user:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    provider = user.get("provider") or "password"
+    if provider == "google":
+        # This account was created via Google
+        return jsonify({"error": "This account uses Google Sign-in. Please use Google login."}), 400
+
+    hashed = user.get("password")
+    if not hashed:
+        return jsonify({"error": "No password set for this account"}), 400
+
+    # if not bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8")):
+    #     return jsonify({"error": "Invalid credentials"}), 401
+
+    token = generate_jwt({"id": user["id"], "email": email})
+    # DB_CONN.close()
+    return jsonify({"token": token})
+
+# GOOGLE SIGN-IN (credential from frontend)
+@app.route("/api/auth/google", methods=["POST"])
+def google_auth():
+    data = request.json or {}
+    credential = data.get("credential")
+    if not credential:
+        return jsonify({"error": "Missing credential"}), 400
+
+    try:
+        idinfo = id_token.verify_oauth2_token(credential, grequests.Request(), GOOGLE_CLIENT_ID)
+        # idinfo contains 'email', 'email_verified', 'name', 'sub' (Google user id), etc.
+        email = idinfo.get("email")
+        name = idinfo.get("name") or ""
+        if not email:
+            return jsonify({"error": "Google did not provide email"}), 400
+        cur= get_cursor()
+        cur.execute("SELECT id, provider FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+
+        if user:
+            # existing user
+            user_id = user["id"]
+            provider = user.get("provider") or "password"
+            # If existing provider is 'password' we may optionally allow linking; for now we'll allow login
+            # Optionally, if you want to auto-set provider to both, or mark linked, implement here.
+            # We'll keep provider as-is (password) if password exists.
+        else:
+            # create new user with provider=google
+            cur.execute(
+                "INSERT INTO users (name, email, provider, created_at) VALUES (%s,%s,%s,NOW()) RETURNING id",
+                (name, email, "google")
+            )
+            user_id = cur.fetchone()["id"]
+            DB_CONN.commit()
+
+        token = generate_jwt({"id": user_id, "email": email})
+        # DB_CONN.close()
+        return jsonify({"token": token})
+
+    except ValueError as e:
+        print("Google token verify error:", e)
+        return jsonify({"error": "Invalid Google token"}), 400
+    except Exception as e:
+        print("Google auth error:", e)
+        return jsonify({"error": "Google auth failed"}), 500
+
+# Example protected route
+@app.route("/api/me")
+def me():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized"}),
+    token = auth.replace("Bearer ", "")
+    try:
+        payload = decode_jwt(token)
+        user_id = payload.get("id")
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
+        user = cur.fetchone()
+        # DB_CONN.close()
+        return jsonify(user)
+    except Exception as e:
+        print("JWT error", e)
+        return jsonify({"error": "Invalid token"}), 401
 
 
 

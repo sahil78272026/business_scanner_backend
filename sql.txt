@@ -29,3 +29,10 @@ ADD COLUMN status VARCHAR(50) DEFAULT 'not_contacted';
 
 ALTER TABLE saved_businesses
 ADD COLUMN notes TEXT DEFAULT '';
+
+ALTER TABLE users
+ADD COLUMN provider VARCHAR(20) DEFAULT 'password';
+
+ALTER TABLE users
+ALTER COLUMN password DROP NOT NULL;
+
