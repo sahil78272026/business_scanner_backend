@@ -1,38 +1,32 @@
-
+-- ===========================
+-- Users Table
+-- ===========================
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     email VARCHAR(255) UNIQUE NOT NULL,
-    password VARCHAR(255) NOT NULL,
+    name VARCHAR(255),
+    password VARCHAR(255),                -- nullable for Google sign-in
+    provider VARCHAR(20) DEFAULT 'password',
     credits INTEGER DEFAULT 5,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
-
+-- ===========================
+-- Saved/Favorite Businesses
+-- ===========================
 CREATE TABLE saved_businesses (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     address TEXT,
     phone TEXT,
     website TEXT,
+    emails TEXT,                           -- comma separated or JSON
     rating REAL,
     reviews_count INTEGER,
     maps_url TEXT,
+    status VARCHAR(50) DEFAULT 'not_contacted',  -- lead status
+    notes TEXT DEFAULT '',                  -- user CRM notes
     saved_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(user_id, name, address)
 );
-
-
-
-ALTER TABLE saved_businesses
-ADD COLUMN status VARCHAR(50) DEFAULT 'not_contacted';
-
-ALTER TABLE saved_businesses
-ADD COLUMN notes TEXT DEFAULT '';
-
-ALTER TABLE users
-ADD COLUMN provider VARCHAR(20) DEFAULT 'password';
-
-ALTER TABLE users
-ALTER COLUMN password DROP NOT NULL;
-

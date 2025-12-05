@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from common_helpers import extract_emails_from_website
 from google_helpers import geocode_city, GOOGLE_API_KEY, fetch_businesses
-from db_extentions import get_cursor, DB_CONN
+from db_extentions import get_db_connection
 import bcrypt
 import datetime
 from flask import Flask, request, jsonify
@@ -33,11 +33,6 @@ APP_SECRET = os.getenv("APP_SECRET", "change-this-secret")
 JWT_ALGO = "HS256"
 JWT_EXP_DELTA_SECONDS = int(os.getenv("JWT_EXP", 60*60*24*7))  # one week
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")  # same as VITE_GOOGLE_CLIENT_ID
-DB_URI = os.getenv("DATABASE_URL")  # e.g., postgres://user:pass@host:5432/dbname
-
-def get_db():
-    conn = psycopg2.connect(DB_URI)
-    return conn
 
 # JWT helpers
 def generate_jwt(payload):
@@ -51,8 +46,6 @@ def generate_jwt(payload):
 
 def decode_jwt(token):
     return jwt.decode(token, APP_SECRET, algorithms=[JWT_ALGO])
-
-
 
 
 
@@ -233,7 +226,8 @@ def profile():
     except:
         return {"error": "Invalid or expired token"}, 401
 
-    cur = get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT id, email, created_at FROM users WHERE id=%s", (user_id,))
     user = cur.fetchone()
     return user
@@ -253,7 +247,8 @@ def save_business():
 
     data = request.json
 
-    cur = get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
                 INSERT INTO saved_businesses
@@ -274,7 +269,7 @@ def save_business():
             ))
 
         result = cur.fetchone()
-        DB_CONN.commit()
+        conn.commit()
 
         if result:
             return {"message": "Saved successfully"}
@@ -298,7 +293,8 @@ def get_saved_businesses():
     except:
         return {"error": "Invalid token"}, 401
 
-    cur = get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM saved_businesses WHERE user_id=%s ORDER BY saved_at DESC", (user_id,))
     rows = cur.fetchall()
     # ⭐ Convert stored TEXT to list
@@ -345,14 +341,15 @@ def update_status():
     print(business_id)
     print(status)
     print(user_id)
-    cur = get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
             UPDATE saved_businesses
             SET status = %s
             WHERE id = %s AND user_id = %s
         """, (status, business_id, user_id))
-        DB_CONN.commit()
+        conn.commit()
     except Exception as e:
         print(e)
 
@@ -375,13 +372,14 @@ def update_notes():
     business_id = data.get("id")
     notes = data.get("notes")
 
-    cur = get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
         UPDATE saved_businesses
         SET notes = %s
         WHERE id = %s AND user_id = %s
     """, (notes, business_id, user_id))
-    DB_CONN.commit()
+    conn.commit()
 
     return {"success": True}
 
@@ -398,7 +396,8 @@ def register():
     if not name or not email or not password:
         return jsonify({"error": "name, email and password required"}), 400
 
-    cur = get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     # Check if user exists
     cur.execute("SELECT id, provider FROM users WHERE email = %s", (email,))
     existing = cur.fetchone()
@@ -417,7 +416,7 @@ def register():
         (name, email, hashed, "password")
     )
     user_id = cur.fetchone()["id"]
-    DB_CONN.commit()
+    conn.commit()
 
     token = generate_jwt({"id": user_id, "email": email})
     # DB_CONN.close()
@@ -433,7 +432,8 @@ def login():
     if not email or not password:
         return jsonify({"error": "email and password required"}), 400
 
-    cur=get_cursor()
+    conn = get_db_connection()
+    cur=conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT id, password, provider FROM users WHERE email = %s", (email,))
     user = cur.fetchone()
 
@@ -471,7 +471,9 @@ def google_auth():
         name = idinfo.get("name") or ""
         if not email:
             return jsonify({"error": "Google did not provide email"}), 400
-        cur= get_cursor()
+        conn= get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
         cur.execute("SELECT id, provider FROM users WHERE email = %s", (email,))
         user = cur.fetchone()
 
@@ -489,7 +491,7 @@ def google_auth():
                 (name, email, "google")
             )
             user_id = cur.fetchone()["id"]
-            DB_CONN.commit()
+            conn.commit()
 
         token = generate_jwt({"id": user_id, "email": email})
         # DB_CONN.close()
@@ -512,10 +514,11 @@ def me():
     try:
         payload = decode_jwt(token)
         user_id = payload.get("id")
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        conn = get_db_connection()
+        cur=conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
         user = cur.fetchone()
+        conn.close()
         # DB_CONN.close()
         return jsonify(user)
     except Exception as e:
