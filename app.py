@@ -8,7 +8,7 @@ from flask_cors import CORS
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from common_helpers import extract_emails_from_website
+from common_helpers import extract_emails_from_website, update_user_credits, get_user_by_id
 from google_helpers import geocode_city, GOOGLE_API_KEY, fetch_businesses
 from db_extentions import get_db_connection
 import bcrypt
@@ -93,17 +93,58 @@ def api_businesses():
     return jsonify(businesses)
 
 
+def decode_token(token):
+    try:
+        data = jwt.decode(token, APP_SECRET, algorithms=["HS256"])
+        print(data)
+        return data.get("id")
+    except Exception:
+        return None
+
 # Export business list as CSV
 @app.post("/api/export-csv")
 def export_csv_post():
+    # import pdb; pdb.set_trace()
+    # --- 1. AUTHENTICATION ---
+    auth_header = request.headers.get("Authorization")
+    print(auth_header)
+    if not auth_header:
+        return jsonify({"error": "Missing token"}), 401
+
+    token = auth_header.replace("Bearer ", "")
+    user_id = decode_token(token)
+    print(user_id)
+    if not user_id:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    # Get user
+    user = get_user_by_id(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # --- 2. CREDIT CHECK ---
+    EXPORT_COST = 5  # cost per export
+
+    if user["credits"] < EXPORT_COST:
+        return jsonify({
+            "error": "Not enough credits",
+            "credits_left": user["credits"],
+            "required": EXPORT_COST
+        }), 402  # Payment Required
+
+    # --- 3. VALIDATE REQUEST DATA ---
     data = request.json.get("businesses", [])
     if not data:
         return jsonify({"error": "No business data provided"}), 400
 
+    # --- 4. DEDUCT CREDITS ---
+    new_credits = user["credits"] - EXPORT_COST
+    update_user_credits(user_id, new_credits)
+
+    # --- 5. GENERATE CSV ---
     output = io.StringIO()
     writer = csv.writer(output)
 
-    # Add headers
     writer.writerow([
         "Name",
         "Address",
@@ -115,7 +156,6 @@ def export_csv_post():
         "Emails"
     ])
 
-    # Add business rows
     for b in data:
         emails_str = ", ".join(b.get("emails", []))
 
@@ -134,12 +174,18 @@ def export_csv_post():
     mem = io.BytesIO(output.getvalue().encode("utf-8"))
     mem.seek(0)
 
-    return send_file(
+    # --- 6. RETURN FILE + UPDATED CREDIT INFO ---
+    response = send_file(
         mem,
         mimetype="text/csv",
         download_name="businesses.csv",
         as_attachment=True
     )
+
+    # Add headers with updated credits for frontend
+    response.headers["X-Credits-Left"] = str(new_credits)
+
+    return response
 
 
 @app.get("/api/autocomplete")
@@ -163,56 +209,6 @@ def autocomplete():
 
     return jsonify(suggestions)
 
-
-# @app.post("/api/register")
-# def register():
-#     data = request.json
-#     email = data.get("email")
-#     password = data.get("password")
-
-#     if not email or not password:
-#         return {"error": "Email and password required"}, 400
-
-#     hashed = bcrypt.generate_password_hash(password).decode("utf-8")
-
-#     try:
-#         cur = get_cursor()
-#         cur.execute(
-#             "INSERT INTO users (email, password) VALUES (%s, %s) RETURNING id",
-#             (email, hashed),
-#         )
-#         user = cur.fetchone()
-#         DB_CONN.commit()
-
-#         return {"message": "User registered successfully", "user_id": user["id"]}
-
-#     except Exception as e:
-#         print(e)
-#         return {"error": "Email already in use"}, 400
-
-# @app.post("/api/login")
-# def login():
-#     data = request.json
-#     email = data.get("email")
-#     password = data.get("password")
-
-#     cur = get_cursor()
-#     cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-#     user = cur.fetchone()
-
-#     if not user:
-#         return {"error": "User not found"}, 400
-
-#     if not bcrypt.check_password_hash(user["password"], password):
-#         return {"error": "Incorrect password"}, 400
-
-#     token = jwt.encode(
-#         {"id": user["id"], "exp": datetime.utcnow() + timedelta(days=1)},
-#         SECRET,
-#         algorithm="HS256"
-#     )
-
-#     return {"token": token, "email": user["email"]}
 
 @app.get("/api/profile")
 def profile():
@@ -399,7 +395,7 @@ def register():
     conn = get_db_connection()
     cur=conn.cursor(cursor_factory=RealDictCursor)
     # Check if user exists
-    cur.execute("SELECT id, provider FROM users WHERE email = %s", (email,))
+    cur.execute("SELECT id, provider, credits FROM users WHERE email = %s", (email,))
     existing = cur.fetchone()
     if existing:
         # If user exists and provider is google, do not create password user
@@ -415,12 +411,12 @@ def register():
         "INSERT INTO users (name, email, password, provider, created_at) VALUES (%s,%s,%s,%s,NOW()) RETURNING id",
         (name, email, hashed, "password")
     )
-    user_id = cur.fetchone()["id"]
+    user_id = cur.fetchone()
     conn.commit()
 
-    token = generate_jwt({"id": user_id, "email": email})
+    token = generate_jwt({"id": user_id["id"], "email": email})
     # DB_CONN.close()
-    return jsonify({"token": token})
+    return jsonify({"token": token, "credits": user_id["credits"]})
 
 # LOGIN (email/password)
 @app.route("/api/login", methods=["POST"])
@@ -434,7 +430,7 @@ def login():
 
     conn = get_db_connection()
     cur=conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT id, password, provider FROM users WHERE email = %s", (email,))
+    cur.execute("SELECT id, password, provider, credits FROM users WHERE email = %s", (email,))
     user = cur.fetchone()
 
     if not user:
@@ -453,8 +449,10 @@ def login():
     #     return jsonify({"error": "Invalid credentials"}), 401
 
     token = generate_jwt({"id": user["id"], "email": email})
+
     # DB_CONN.close()
-    return jsonify({"token": token})
+    print("token at login", token)
+    return jsonify({"token": token, "credits": user["credits"]})
 
 # GOOGLE SIGN-IN (credential from frontend)
 @app.route("/api/auth/google", methods=["POST"])
@@ -474,7 +472,7 @@ def google_auth():
         conn= get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        cur.execute("SELECT id, provider FROM users WHERE email = %s", (email,))
+        cur.execute("SELECT id, provider, credits FROM users WHERE email = %s", (email,))
         user = cur.fetchone()
 
         if user:
@@ -494,8 +492,9 @@ def google_auth():
             conn.commit()
 
         token = generate_jwt({"id": user_id, "email": email})
+        print("google auth token", token)
         # DB_CONN.close()
-        return jsonify({"token": token})
+        return jsonify({"token": token, "credits": user["credits"]})
 
     except ValueError as e:
         print("Google token verify error:", e)
@@ -503,6 +502,35 @@ def google_auth():
     except Exception as e:
         print("Google auth error:", e)
         return jsonify({"error": "Google auth failed"}), 500
+
+
+@app.route("/api/credits", methods=["GET"])
+def get_credits():
+  auth = request.headers.get("Authorization", "")
+  if not auth.startswith("Bearer "):
+      return jsonify({"error": "Unauthorized"}), 401
+
+  token = auth.replace("Bearer ", "")
+  try:
+      payload = decode_jwt(token)
+  except Exception:
+      return jsonify({"error": "Invalid token"}), 401
+
+  user_id = payload.get("id")
+  if not user_id:
+      return jsonify({"error": "Invalid token payload"}), 401
+
+  conn = get_db_connection()
+  cur = conn.cursor(cursor_factory=RealDictCursor)
+  cur.execute("SELECT credits FROM users WHERE id = %s", (user_id,))
+  row = cur.fetchone()
+  cur.close()
+  conn.close()
+
+  if not row:
+      return jsonify({"error": "User not found"}), 404
+
+  return jsonify({"credits": row["credits"]})
 
 # Example protected route
 @app.route("/api/me")

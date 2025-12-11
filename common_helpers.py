@@ -1,6 +1,7 @@
 import re
 import requests
 from dotenv import load_dotenv
+from db_extentions import get_db_connection
 
 load_dotenv()
 
@@ -105,3 +106,22 @@ def extract_emails_from_website(url):
     print("Final cleaned emails:", cleaned_final)
 
     return cleaned_final
+
+def update_user_credits(user_id, credits):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET credits=%s WHERE id=%s", (credits, user_id))
+    conn.commit()
+    cur.close()
+
+def get_user_by_id(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, email, credits FROM users WHERE id=%s", (user_id,))
+    row = cur.fetchone()
+    cur.close()
+
+    if not row:
+        return None
+
+    return {"id": row[0], "email": row[1], "credits": row[2]}

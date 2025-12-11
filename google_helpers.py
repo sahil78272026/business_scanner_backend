@@ -46,6 +46,7 @@ def fetch_businesses(lat, lng, place_type=None, radius=2000, keyword=None, next_
 
 
     results = data.get("results", [])
+    # print(results)
     results = results[:25]  # Limit to avoid too many API calls
     next_page_token = data.get("next_page_token")  # ⭐ NEW
 

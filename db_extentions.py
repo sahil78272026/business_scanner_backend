@@ -26,7 +26,7 @@ port = os.getenv("DB_PORT")
 
 def get_cursor():
     try:
-        print("Db Connection string", os.getenv("DATABASE_URL"))
+
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         return conn.cursor(cursor_factory=RealDictCursor)
 
@@ -36,6 +36,7 @@ def get_cursor():
 
 def get_db_connection():
     try:
+        print("Db Connection string", os.getenv("DATABASE_URL"))
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         return conn
 
