@@ -43,5 +43,29 @@ app.include_router(export_routes.router)
 
 
 @app.get("/", tags=["Health"])
+def root():
+    """Lightweight ping — no DB hit. Ideal for cron keep-alive."""
+    from datetime import datetime, timezone
+    return {"status": "ok", "version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/health", tags=["Health"])
 def health_check():
-    return {"status": "ok", "version": "2.0.0"}
+    """Full health check — pings the database with SELECT 1."""
+    from datetime import datetime, timezone
+    from app.db.connection import get_connection, release_connection
+
+    result = {"app": "ok", "db": "unknown", "version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        cur.close()
+        release_connection(conn)
+        result["db"] = "ok"
+    except Exception as e:
+        result["db"] = f"error: {str(e)}"
+
+    return result
