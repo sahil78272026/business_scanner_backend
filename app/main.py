@@ -45,3 +45,8 @@ app.include_router(export_routes.router)
 @app.get("/", tags=["Health"])
 def health_check():
     return {"status": "ok", "version": "2.0.0"}
+
+
+@app.get("/keep-alive", tags=["Health"])
+def keep_alive():
+    return {"status": "alive"}
