@@ -2,3 +2,11 @@
 env_business_scanner/
 __pycahce__/
 notes.txt
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+venv/
